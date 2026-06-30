@@ -19,14 +19,14 @@ function renderPage(uri: string): string {
   img { display: block; margin-top: .75rem; border: 1px solid #ddd; border-radius: 8px; }
 </style></head>
 <body>
-<h1>Połącz HashPack</h1>
-<p id="no-uri" hidden>Brak aktywnego pairing URI. Wywołaj najpierw authorize_start, potem odśwież.</p>
+<h1>Connect HashPack</h1>
+<p id="no-uri" hidden>No active pairing URI. Call authorize_start first, then refresh.</p>
 <div id="choices">
-  <button id="btn-ext">Połącz przez rozszerzenie</button>
-  <button id="btn-mobile">Połącz przez telefon (QR)</button>
+  <button id="btn-ext">Connect via extension</button>
+  <button id="btn-mobile">Connect via mobile (QR)</button>
   <p id="ext-status"></p>
   <div id="mobile-area" hidden>
-    <p>Zeskanuj w HashPack mobile lub wklej URI w WalletConnect:</p>
+    <p>Scan in HashPack mobile or paste the URI in WalletConnect:</p>
     <img src="/qr.png" alt="WalletConnect QR" width="280" height="280" />
     <code id="uri"></code>
   </div>
@@ -50,16 +50,16 @@ function renderPage(uri: string): string {
         const name = (meta.name || "").toLowerCase();
         if (name && !name.includes("hashpack")) return;
         connectSent = true;
-        extStatus.textContent = "Znaleziono " + (meta.name || meta.id) + " — zatwierdź w HashPack.";
+        extStatus.textContent = "Found " + (meta.name || meta.id) + " — approve in HashPack.";
         window.postMessage({ type: "hedera-extension-connect-" + meta.id, pairingString: WC_URI }, "*");
       }
     });
     document.getElementById("btn-ext").onclick = () => {
       extRequested = true;
-      extStatus.textContent = "Szukam rozszerzenia HashPack…";
+      extStatus.textContent = "Looking for the HashPack extension…";
       window.postMessage({ type: "hedera-extension-query" }, "*");
       setTimeout(() => {
-        if (!connectSent) extStatus.textContent = "Nie wykryto rozszerzenia HashPack. Zainstaluj/odblokuj i spróbuj ponownie.";
+        if (!connectSent) extStatus.textContent = "HashPack extension not detected. Install/unlock it and try again.";
       }, 2000);
     };
     document.getElementById("btn-mobile").onclick = () => {
@@ -73,8 +73,8 @@ function renderPage(uri: string): string {
         if (s.connected) {
           clearInterval(poll);
           document.body.innerHTML =
-            "<h1>✅ Połączono</h1><p>Konto: " + (s.accountId || "") +
-            ". Możesz zamknąć tę kartę.</p>";
+            "<h1>✅ Connected</h1><p>Account: " + (s.accountId || "") +
+            ". You can close this tab.</p>";
           window.close();
         }
       } catch (_e) {}
