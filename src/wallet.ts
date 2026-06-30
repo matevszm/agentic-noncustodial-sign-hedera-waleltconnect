@@ -23,7 +23,19 @@ let connector: DAppConnector | null = null;
 let session: WcSession | null = null;
 let pendingApproval: Promise<WcSession> | null = null;
 let connectedAccountId: string | null = null;
+let currentUri: string | null = null;
 let freezeClient: Client | null = null;
+
+export function getCurrentUri(): string | null {
+  return currentUri;
+}
+
+export function getSessionStatus(): {
+  connected: boolean;
+  accountId: string | null;
+} {
+  return { connected: session !== null, accountId: connectedAccountId };
+}
 
 function getFreezeClient(): Client {
   if (!freezeClient) {
@@ -58,7 +70,10 @@ export async function initWallet(): Promise<void> {
 export function startAuthorization(): Promise<string> {
   const c = requireConnector();
   return new Promise<string>((resolveUri, rejectUri) => {
-    const approval = c.connect((uri) => resolveUri(uri));
+    const approval = c.connect((uri) => {
+      currentUri = uri;
+      resolveUri(uri);
+    });
     pendingApproval = approval;
     approval.catch(rejectUri);
   });
@@ -92,6 +107,7 @@ export async function awaitAuthorization(
     }
     session = approved;
     connectedAccountId = accountId;
+    currentUri = null;
     return { accountId, network: config.network };
   } finally {
     clearTimeout(timer);

@@ -1,12 +1,14 @@
-import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import QRCode from "qrcode";
 import { z } from "zod";
+import { config } from "./config.js";
+import { startConnectServer } from "./http.js";
 import { buildHbarTransfer, parseAccountId, parseHbar } from "./tx.js";
 import {
   awaitAuthorization,
   getConnectedAccount,
+  getCurrentUri,
+  getSessionStatus,
   initWallet,
   signAndExecute,
   startAuthorization,
@@ -23,6 +25,7 @@ function errorText(error: unknown) {
 
 async function main(): Promise<void> {
   await initWallet();
+  startConnectServer(config.httpPort, getCurrentUri, getSessionStatus);
 
   const server = new McpServer({
     name: "walletconnect-agentic-payment",
@@ -34,18 +37,17 @@ async function main(): Promise<void> {
     {
       title: "Start wallet authorization",
       description:
-        "Begin WalletConnect pairing. Returns a wc: URI and a QR code to present to the user (scan/open in HashPack). Non-blocking; call authorize_await next.",
+        "Begin WalletConnect pairing. Returns a connectUrl with two options (browser extension or mobile QR). Non-blocking. Present connectUrl to the user, then IMMEDIATELY call authorize_await — it resolves automatically once the user connects, so no manual confirmation is needed.",
     },
     async () => {
       try {
         const uri = await startAuthorization();
-        const qrCodeFile = join(process.cwd(), "wc-qr.png");
-        await QRCode.toFile(qrCodeFile, uri);
+        const connectUrl = `http://localhost:${config.httpPort}/connect`;
         return text(
           JSON.stringify({
+            connectUrl,
             uri,
-            qrCodeFile,
-            note: "Tell the user to open qrCodeFile and scan it in HashPack (camera/scan button), or paste the wc: URI into HashPack's WalletConnect connect screen. Do not print any base64. Then call authorize_await once the user confirms.",
+            note: "Give the user connectUrl to open in a browser: it offers 'extension' and 'mobile QR' buttons. Then call authorize_await right away (do not wait for the user to say anything) — it returns automatically when the connection is approved, and the browser tab will show a success message.",
           }),
         );
       } catch (error) {

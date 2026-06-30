@@ -10,6 +10,7 @@ if (!projectId) {
 export const config = {
   projectId,
   network: "testnet" as const,
+  httpPort: Number(process.env.CONNECT_PORT ?? 7777),
   metadata: {
     name: process.env.DAPP_NAME ?? "Agentic Payment (PoC)",
     description:
