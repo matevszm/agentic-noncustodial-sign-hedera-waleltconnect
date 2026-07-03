@@ -19,22 +19,24 @@ const {
 
 type WcSession = Awaited<ReturnType<DAppConnector["connect"]>>;
 
-let connector: DAppConnector | null = null;
-let session: WcSession | null = null;
-let pendingApproval: Promise<WcSession> | null = null;
-let connectedAccountId: string | null = null;
-let currentUri: string | null = null;
-let freezeClient: Client | null = null;
-
-export function getCurrentUri(): string | null {
-  return currentUri;
+interface SessionState {
+  topic: string | null;
+  accountId: string | null;
+  pendingApproval: Promise<WcSession> | null;
+  currentUri: string | null;
 }
 
-export function getSessionStatus(): {
-  connected: boolean;
-  accountId: string | null;
-} {
-  return { connected: session !== null, accountId: connectedAccountId };
+const sessions = new Map<string, SessionState>();
+let connector: DAppConnector | null = null;
+let freezeClient: Client | null = null;
+
+function getOrCreate(sid: string): SessionState {
+  let state = sessions.get(sid);
+  if (!state) {
+    state = { topic: null, accountId: null, pendingApproval: null, currentUri: null };
+    sessions.set(sid, state);
+  }
+  return state;
 }
 
 function getFreezeClient(): Client {
@@ -49,6 +51,18 @@ function requireConnector(): DAppConnector {
     throw new Error("Wallet not initialized");
   }
   return connector;
+}
+
+export function getCurrentUri(sid: string): string | null {
+  return sessions.get(sid)?.currentUri ?? null;
+}
+
+export function getSessionStatus(sid: string): {
+  connected: boolean;
+  accountId: string | null;
+} {
+  const state = sessions.get(sid);
+  return { connected: !!state?.topic, accountId: state?.accountId ?? null };
 }
 
 export async function initWallet(): Promise<void> {
@@ -67,25 +81,40 @@ export async function initWallet(): Promise<void> {
   connector = created;
 }
 
-export function startAuthorization(): Promise<string> {
+export async function startAuthorization(sid: string): Promise<string> {
   const c = requireConnector();
+  const state = getOrCreate(sid);
+
+  if (state.topic) {
+    try {
+      await c.disconnect(state.topic);
+    } catch {
+      // stale topic; nothing to disconnect
+    }
+    state.topic = null;
+    state.accountId = null;
+    state.currentUri = null;
+  }
+
   return new Promise<string>((resolveUri, rejectUri) => {
     const approval = c.connect((uri) => {
-      currentUri = uri;
+      state.currentUri = uri;
       resolveUri(uri);
     });
-    pendingApproval = approval;
+    state.pendingApproval = approval;
     approval.catch(rejectUri);
   });
 }
 
 export async function awaitAuthorization(
+  sid: string,
   timeoutMs = 120_000,
 ): Promise<{ accountId: string; network: string }> {
-  if (!pendingApproval) {
+  const state = getOrCreate(sid);
+  if (!state.pendingApproval) {
     throw new Error("No pending authorization. Call authorize_start first.");
   }
-  const approval = pendingApproval;
+  const approval = state.pendingApproval;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -105,39 +134,48 @@ export async function awaitAuthorization(
     if (!accountId) {
       throw new Error("Could not parse account id from session");
     }
-    session = approved;
-    connectedAccountId = accountId;
-    currentUri = null;
+    state.topic = approved.topic;
+    state.accountId = accountId;
+    state.currentUri = null;
+    // step-0 verification: confirm signer routing key (.topic) matches the session.
+    console.error(
+      `[wallet] sid=${sid} session topic=${approved.topic} signers=`,
+      requireConnector().signers.map((s) => ({
+        topic: s.topic,
+        account: s.getAccountId().toString(),
+      })),
+    );
     return { accountId, network: config.network };
   } finally {
     clearTimeout(timer);
-    pendingApproval = null;
+    state.pendingApproval = null;
   }
 }
 
-export function getConnectedAccount(): AccountId {
-  if (!session || !connectedAccountId) {
+export function getConnectedAccount(sid: string): AccountId {
+  const state = sessions.get(sid);
+  if (!state?.topic || !state.accountId) {
     throw new Error(
       "Not authorized. Run authorize_start and authorize_await first.",
     );
   }
-  return AccountId.fromString(connectedAccountId);
+  return AccountId.fromString(state.accountId);
 }
 
 export async function signAndExecute(
+  sid: string,
   tx: TransferTransaction,
 ): Promise<{ transactionId: string }> {
   const c = requireConnector();
-  if (!session || !connectedAccountId) {
+  const state = sessions.get(sid);
+  if (!state?.topic) {
     throw new Error(
       "Not authorized. Run authorize_start and authorize_await first.",
     );
   }
-  const signer = c.signers.find(
-    (s) => s.getAccountId().toString() === connectedAccountId,
-  );
+  const signer = c.signers.find((s) => s.topic === state.topic);
   if (!signer) {
-    throw new Error("No signer for the connected account. Re-authorize.");
+    throw new Error("No signer for this session. Re-authorize.");
   }
   // freezeWith supplies node account IDs (the signer's populateTransaction does not);
   // signing and broadcast still happen in HashPack via executeWithSigner.

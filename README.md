@@ -5,9 +5,11 @@ An MCP server that lets an AI agent authorize a HashPack wallet and send HBAR on
 WalletConnect — **private keys never leave the wallet**, and the server holds no
 keys and cannot move funds on its own.
 
-A single Node/TypeScript process hosts both the MCP server (stdio) and an
-embedded WalletConnect dApp client (the "Approver"), plus a small local HTTP
-server that serves a browser connect page.
+A single Node/TypeScript process hosts everything on one HTTP port: the MCP
+server (Streamable HTTP, at `/mcp`), an embedded WalletConnect dApp client (the
+"Approver"), and a browser connect page (`/connect`). It serves **many
+concurrent users** — each client identifies itself with a stable UUID v4 sent in
+the `sid` HTTP header, and every session's wallet state is isolated.
 
 ## Requirements
 
@@ -46,13 +48,24 @@ pnpm test    # run the transaction-builder self-check
 
 ### Register with an MCP client (Claude Code)
 
+Start the server yourself first (`pnpm dev`) — with HTTP transport the client
+connects to a running URL, it does not spawn the process. Then register it,
+passing your `sid` (any UUID v4) as a header. Generate one inline:
+
 ```bash
-claude mcp add hbar -- bash -c "cd /ABS/PATH/TO/REPO && exec node_modules/.bin/tsx src/server.ts"
+claude mcp add hbar http://localhost:7777/mcp --transport http --header "sid: $(uuidgen)"
 ```
 
-Running `tsx` directly (not `pnpm dev`) keeps stdout clean for the MCP channel;
-the `cd` ensures `.env` is loaded. Confirm the tools with `claude mcp list` /
-`/mcp` after restarting the session.
+Put `name` and the URL first and `--header` last: `--header` is variadic, so if
+it comes before the positionals it swallows them (`missing required argument 'name'`).
+No `uuidgen`? Use `$(cat /proc/sys/kernel/random/uuid)` instead (always v4, no
+package needed).
+
+Each user/client registers with their own `sid` — it is generated once at add
+time and stored in the client config, so it stays stable (`claude mcp get hbar`
+to see it). Confirm the tools with `claude mcp list` / `/mcp`. Without a valid
+`sid` header the tools still list, but every call returns a message telling you
+to add the header.
 
 ## Tools
 
@@ -67,8 +80,9 @@ the `cd` ensures `.env` is loaded. Confirm the tools with `claude mcp list` /
 **Authorize**
 
 1. The agent calls `authorize_start` → gets `connectUrl`
-   (`http://localhost:7777/connect`), presents it, and immediately calls
-   `authorize_await` (which blocks until approval — no manual confirmation needed).
+   (`http://localhost:7777/connect?sid=<yours>`), presents it, and immediately
+   calls `authorize_await` (which blocks until approval — no manual confirmation
+   needed).
 2. Open `connectUrl` in a browser and choose **Connect via extension** or
    **Connect via mobile (QR)**.
    - Extension: a connect popup appears in HashPack → approve.
@@ -85,8 +99,12 @@ the `cd` ensures `.env` is loaded. Confirm the tools with `claude mcp list` /
 
 ## Notes & limitations (PoC)
 
-- **Single user, in-memory session.** Restarting the process loses the session —
-  re-authorize before sending.
+- **Sessions are in-memory, keyed by `sid`.** Multiple users are supported
+  concurrently, but nothing is persisted: restarting the process drops all
+  sessions, so every user re-authorizes. No session TTL/eviction.
+- **`sid` is the only identity.** Anyone who knows a `sid` can view/approve that
+  session's connect page — fine for a PoC (a UUID v4 is unguessable), not for
+  production.
 - **Testnet only**; no token/contract transactions, no fee estimation.
 - **No separate transaction preview** — the HashPack popup is the only
   confirmation surface.

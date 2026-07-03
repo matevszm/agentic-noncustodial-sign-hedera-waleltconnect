@@ -1,12 +1,14 @@
-import {createServer} from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import QRCode from "qrcode";
+import { isValidSid } from "./sid.js";
 
 interface SessionStatus {
     connected: boolean;
     accountId: string | null;
 }
 
-function renderPage(uri: string): string {
+function renderPage(uri: string, sid: string): string {
+    const sidParam = encodeURIComponent(sid);
     return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -27,12 +29,13 @@ function renderPage(uri: string): string {
   <p id="ext-status"></p>
   <div id="mobile-area" hidden>
     <p>Scan in HashPack mobile or paste the URI in WalletConnect:</p>
-    <img src="/qr.png" alt="WalletConnect QR" width="280" height="280" />
+    <img src="/qr.png?sid=${sidParam}" alt="WalletConnect QR" width="280" height="280" />
     <code id="uri"></code>
   </div>
 </div>
 <script>
   const WC_URI = ${JSON.stringify(uri)};
+  const SID = ${JSON.stringify(sid)};
   const extStatus = document.getElementById("ext-status");
   document.getElementById("uri").textContent = WC_URI;
 
@@ -68,7 +71,7 @@ function renderPage(uri: string): string {
 
     const poll = setInterval(async () => {
       try {
-        const res = await fetch("/status");
+        const res = await fetch("/status?sid=" + encodeURIComponent(SID));
         const s = await res.json();
         if (s.connected) {
           clearInterval(poll);
@@ -84,50 +87,78 @@ function renderPage(uri: string): string {
 </body></html>`;
 }
 
-export function startConnectServer(
-    port: number,
-    getUri: () => string | null,
-    getStatus: () => SessionStatus,
+function errorPage(): string {
+    return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><title>Connect HashPack</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem;">
+<h1>Missing or invalid session</h1>
+<p>Open the link returned by authorize_start — it contains your <code>sid</code>.</p>
+</body></html>`;
+}
+
+export function handleConnectRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    getUri: (sid: string) => string | null,
+    getStatus: (sid: string) => SessionStatus,
 ): void {
-    const server = createServer((req, res) => {
-        const url = req.url ?? "";
-        if (req.method !== "GET") {
-            res.writeHead(404, {"content-type": "text/plain; charset=utf-8"});
-            res.end("not found");
-            return;
-        }
-        if (url.startsWith("/status")) {
-            res.writeHead(200, {"content-type": "application/json; charset=utf-8"});
-            res.end(JSON.stringify(getStatus()));
-            return;
-        }
-        if (url.startsWith("/qr.png")) {
-            const uri = getUri();
-            if (!uri) {
-                res.writeHead(404, {"content-type": "text/plain; charset=utf-8"});
-                res.end("no pairing uri");
-                return;
-            }
-            QRCode.toBuffer(uri, {type: "png", width: 280})
-                .then((buffer) => {
-                    res.writeHead(200, {"content-type": "image/png"});
-                    res.end(buffer);
-                })
-                .catch(() => {
-                    res.writeHead(500, {"content-type": "text/plain; charset=utf-8"});
-                    res.end("qr generation failed");
-                });
-            return;
-        }
-        if (url.startsWith("/connect")) {
-            res.writeHead(200, {"content-type": "text/html; charset=utf-8"});
-            res.end(renderPage(getUri() ?? ""));
-            return;
-        }
+    if (req.method !== "GET") {
         res.writeHead(404, {"content-type": "text/plain; charset=utf-8"});
         res.end("not found");
-    });
-    server.listen(port, "127.0.0.1", () => {
-        console.error(`connect page on http://localhost:${port}/connect`);
-    });
+        return;
+    }
+
+    const url = new URL(req.url ?? "", "http://localhost");
+    const pathname = url.pathname;
+    const sid = url.searchParams.get("sid");
+    const validSid = isValidSid(sid) ? sid : null;
+
+    if (pathname === "/status") {
+        if (!validSid) {
+            res.writeHead(400, {"content-type": "application/json; charset=utf-8"});
+            res.end(JSON.stringify({error: "missing or invalid sid"}));
+            return;
+        }
+        res.writeHead(200, {"content-type": "application/json; charset=utf-8"});
+        res.end(JSON.stringify(getStatus(validSid)));
+        return;
+    }
+
+    if (pathname === "/qr.png") {
+        if (!validSid) {
+            res.writeHead(400, {"content-type": "text/plain; charset=utf-8"});
+            res.end("missing or invalid sid");
+            return;
+        }
+        const uri = getUri(validSid);
+        if (!uri) {
+            res.writeHead(404, {"content-type": "text/plain; charset=utf-8"});
+            res.end("no pairing uri");
+            return;
+        }
+        QRCode.toBuffer(uri, {type: "png", width: 280})
+            .then((buffer) => {
+                res.writeHead(200, {"content-type": "image/png"});
+                res.end(buffer);
+            })
+            .catch(() => {
+                res.writeHead(500, {"content-type": "text/plain; charset=utf-8"});
+                res.end("qr generation failed");
+            });
+        return;
+    }
+
+    if (pathname === "/connect") {
+        if (!validSid) {
+            res.writeHead(400, {"content-type": "text/html; charset=utf-8"});
+            res.end(errorPage());
+            return;
+        }
+        res.writeHead(200, {"content-type": "text/html; charset=utf-8"});
+        res.end(renderPage(getUri(validSid) ?? "", validSid));
+        return;
+    }
+
+    res.writeHead(404, {"content-type": "text/plain; charset=utf-8"});
+    res.end("not found");
 }

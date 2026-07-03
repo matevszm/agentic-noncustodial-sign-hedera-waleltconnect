@@ -1,8 +1,10 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { config } from "./config.js";
-import { startConnectServer } from "./http.js";
+import { handleConnectRequest } from "./http.js";
+import { SID_HEADER, SID_MISSING_MESSAGE, isValidSid } from "./sid.js";
 import { buildHbarTransfer, parseAccountId, parseHbar } from "./tx.js";
 import {
   awaitAuthorization,
@@ -23,10 +25,7 @@ function errorText(error: unknown) {
   return { content: [{ type: "text" as const, text: message }], isError: true };
 }
 
-async function main(): Promise<void> {
-  await initWallet();
-  startConnectServer(config.httpPort, getCurrentUri, getSessionStatus);
-
+function buildMcpServer(sid: string | null): McpServer {
   const server = new McpServer({
     name: "walletconnect-agentic-payment",
     version: "1.0.0",
@@ -40,9 +39,10 @@ async function main(): Promise<void> {
         "Begin WalletConnect pairing. Returns a connectUrl with two options (browser extension or mobile QR). Non-blocking. Present connectUrl to the user, then IMMEDIATELY call authorize_await — it resolves automatically once the user connects, so no manual confirmation is needed.",
     },
     async () => {
+      if (sid === null) return errorText(new Error(SID_MISSING_MESSAGE));
       try {
-        const uri = await startAuthorization();
-        const connectUrl = `http://localhost:${config.httpPort}/connect`;
+        const uri = await startAuthorization(sid);
+        const connectUrl = `http://localhost:${config.httpPort}/connect?sid=${encodeURIComponent(sid)}`;
         return text(
           JSON.stringify({
             connectUrl,
@@ -64,8 +64,9 @@ async function main(): Promise<void> {
         "Block until the user approves the pairing in HashPack (up to ~120s). Returns the connected accountId and network.",
     },
     async () => {
+      if (sid === null) return errorText(new Error(SID_MISSING_MESSAGE));
       try {
-        return text(JSON.stringify(await awaitAuthorization()));
+        return text(JSON.stringify(await awaitAuthorization(sid)));
       } catch (error) {
         return errorText(error);
       }
@@ -84,10 +85,11 @@ async function main(): Promise<void> {
       },
     },
     async ({ to, amount }) => {
+      if (sid === null) return errorText(new Error(SID_MISSING_MESSAGE));
       try {
-        const from = getConnectedAccount();
+        const from = getConnectedAccount(sid);
         const tx = buildHbarTransfer(from, parseAccountId(to), parseHbar(amount));
-        const { transactionId } = await signAndExecute(tx);
+        const { transactionId } = await signAndExecute(sid, tx);
         return text(
           JSON.stringify({
             transactionId,
@@ -100,9 +102,48 @@ async function main(): Promise<void> {
     },
   );
 
-  const transport = new StdioServerTransport();
+  return server;
+}
+
+async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const header = req.headers[SID_HEADER];
+  const sid = isValidSid(header) ? header : null;
+
+  const server = buildMcpServer(sid);
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  res.on("close", () => {
+    void transport.close();
+    void server.close();
+  });
   await server.connect(transport);
-  console.error("walletconnect-agentic-payment MCP server running on stdio");
+  await transport.handleRequest(req, res);
+}
+
+async function main(): Promise<void> {
+  await initWallet();
+
+  const httpServer = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "", "http://localhost").pathname;
+    if (pathname === "/mcp") {
+      handleMcp(req, res).catch((error) => {
+        console.error("MCP request failed:", error);
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+          res.end("internal error");
+        }
+      });
+      return;
+    }
+    handleConnectRequest(req, res, getCurrentUri, getSessionStatus);
+  });
+
+  httpServer.listen(config.httpPort, "127.0.0.1", () => {
+    console.error(
+      `walletconnect-agentic-payment on http://localhost:${config.httpPort} (MCP: /mcp, connect: /connect?sid=<uuid>)`,
+    );
+  });
 }
 
 main().catch((error) => {
